@@ -1,0 +1,141 @@
+import asyncio
+import os
+import random
+import shutil
+from playwright.async_api import async_playwright
+from datetime import datetime
+import json
+import sys
+
+# --- CONFIGURACIÓN ---
+URL_OBJETIVO = "https://www.forexfactory.com/calendar?day=today"
+# Usamos una carpeta persistente para que guarde tus cookies
+CARPETA_PERFIL = os.path.join(os.getcwd(), "perfil_sucio_v1")
+
+# --- FUNCIONES DE "ACTUACIÓN HUMANA" ---
+
+async def escribir_como_humano(page, texto):
+    for char in texto:
+        delay = random.uniform(0.05, 0.15) # Velocidad de tecleo variable
+        await page.keyboard.type(char, delay=delay * 1000) 
+
+async def mover_mouse_erratico(page):
+    x = random.randint(100, 800)
+    y = random.randint(100, 600)
+    await page.mouse.move(x, y, steps=15)
+
+# --- EL BOT ---
+
+async def correr_scraper_final():
+    print("🚀 Iniciando Scraper Maestro...")
+    
+    # 1. Limpieza de archivos corruptos (Anti-Crash)
+    files = ["lock", ".parentlock", "parent.lock", "sessionstore.jsonlz4"]
+    for f in files:
+        try:
+            p = os.path.join(CARPETA_PERFIL, f)
+            if os.path.exists(p): os.remove(p)
+        except: pass
+
+    async with async_playwright() as p:
+        # 2. Navegador Interno Estable
+        context = await p.firefox.launch_persistent_context(
+            user_data_dir=CARPETA_PERFIL,
+            headless=False,
+            viewport={"width": 1280, "height": 720},
+            args=["--no-remote"],
+            ignore_default_args=["--enable-automation"],
+            java_script_enabled=True
+        )
+
+        # Ocultar rastro de bot
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+        page = context.pages[0] if context.pages else await context.new_page()
+
+        try:
+            print("⏳ Navegando...")
+            await page.bring_to_front()
+            
+            # Navegación orgánica con tecleo
+            await page.goto("about:blank") # Reset
+            await page.wait_for_timeout(1000)
+            
+            # Truco: Teclear URL
+            print("⌨️  Escribiendo dirección...")
+            # Simulamos Ctrl+L (Focus barra) -> Esto es visual en tu mente, 
+            # en código vamos directos pero con delay previo para simular el copy-paste/tecleo
+            await page.goto(URL_OBJETIVO, wait_until="domcontentloaded")
+
+            # Espera inteligente
+            print("👀 Analizando página...")
+            # Esperamos la tabla O el desafío de Cloudflare
+            try:
+                if await page.locator("text=Verify you are human").is_visible(timeout=5000):
+                    print("🛑 Cloudflare detectado. ¡Resuélvelo si puedes!")
+                    await page.wait_for_selector("table.calendar__table", timeout=60000)
+                else:
+                    await page.wait_for_selector("table.calendar__table", timeout=30000)
+            except:
+                print("⚠️ Alerta: Tarda mucho. Intentando leer igual...")
+
+            # --- EXTRACCIÓN CORREGIDA ---
+            if await page.locator("table.calendar__table").is_visible():
+                print("✅ Tabla detectada. Filtrando noticias...")
+                
+                events_data = []
+                rows = await page.query_selector_all("tr.calendar__row")
+                last_valid_time = "All Day" # Memoria para filas sin hora
+
+                for row in rows:
+                    # 1. Selector corregido para IMPACTO
+                    impact_el = await row.query_selector(".calendar__impact span")
+                    clase_impacto = await impact_el.get_attribute("class") if impact_el else ""
+                    
+                    # 2. Verificar si es ROJO (High Impact)
+                    # ForexFactory usa clases como 'impact-red' o 'high'
+                    es_rojo = "impact-red" in clase_impacto or "High" in clase_impacto
+
+                    if es_rojo:
+                        # Extracción de datos
+                        event_el = await row.query_selector(".calendar__event-title")
+                        event_name = await event_el.inner_text() if event_el else "Noticia desconocida"
+                        
+                        currency_el = await row.query_selector(".calendar__currency")
+                        currency = await currency_el.inner_text() if currency_el else ""
+                        
+                        time_el = await row.query_selector(".calendar__time")
+                        time_text = await time_el.inner_text() if time_el else ""
+
+                        # 3. Corrección de Hora Vacía (Heredar de la anterior)
+                        if not time_text or time_text.strip() == "":
+                            time_text = last_valid_time
+                        else:
+                            last_valid_time = time_text # Actualizar memoria
+
+                        # Guardar
+                        events_data.append({
+                            "time": time_text,
+                            "currency": currency,
+                            "impact": "HIGH",
+                            "event": event_name,
+                            "date": datetime.now().strftime("%Y-%m-%d")
+                        })
+                        print(f"🔥 ALERTA ROJA DETECTADA: {time_text} - {currency} - {event_name}")
+
+                # Generar JSON Final
+                with open("market_events.json", "w") as f:
+                    json.dump(events_data, f, indent=4)
+                
+                print(f"\n💾 REPORTE: {len(events_data)} noticias de alto impacto guardadas en 'market_events.json'.")
+            else:
+                print("❌ No se pudo leer la tabla del calendario.")
+
+        except Exception as e:
+            print(f"❌ Error crítico: {e}")
+        finally:
+            print("👋 Terminando proceso.")
+            await context.close()
+
+if __name__ == "__main__":
+    asyncio.run(correr_scraper_final())
